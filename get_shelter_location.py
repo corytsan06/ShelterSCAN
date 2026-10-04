@@ -1,98 +1,229 @@
-from random import random
+"""Flask API for the live HUD shelter lookup used by ShelterSCAN."""
+
+import os
+from time import monotonic, sleep
+from urllib.parse import urlencode
+
+from flask import Flask, jsonify, request
 from selenium import webdriver
+from selenium.common.exceptions import TimeoutException, WebDriverException
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.common.by import By
-from flask import Flask
-from flask import jsonify
-from time import sleep
+
 
 app = Flask(__name__)
 
-def check_loaded(path:str, dri:webdriver.Chrome):
-    while True:
-        try:
-            ele = dri.find_elements(By.XPATH, path)
-            if len(ele)==0:
-                raise ValueError("Nothing found")
-            return ele
-        except ValueError as e:
-            print(e)
-            sleep(1)
+HUD_SEARCH_URL = "https://www.hud.gov/findshelter/Search"
+RESULT_TIMEOUT_SECONDS = 25
+# HUD starts one asynchronous Places-details request per result. Require a
+# meaningful quiet period so a short gap between callbacks is less likely to
+# produce a silently truncated list.
+RESULT_STABLE_SECONDS = 5
+MAX_LOCATION_LENGTH = 200
 
-def get_rand_info():
-    ua = ['Mozilla/5.0 (Windows NT 4.0; WOW64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/37.0.2049.0 Safari/537.36', 
-      'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Ubuntu Chromium/37.0.2062.94 Chrome/37.0.2062.94 Safari/537.36', 
-      'Mozilla/5.0 (Windows NT 6.1; WOW64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/45.0.2454.85 Safari/537.36', 
-      'Mozilla/5.0 (Windows NT 6.3; WOW64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/45.0.2454.85 Safari/537.36',
-      'Mozilla/5.0 (Windows NT 10.0; WOW64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/45.0.2454.85 Safari/537.36', 
-      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/42.0.2311.135 Safari/537.36 Edge/12.10240', 
-      'Mozilla/5.0 (Windows NT 6.1) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/45.0.2454.85 Safari/537.36', 
-      'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_10_5) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/45.0.2454.85 Safari/537.36', 
-      'Mozilla/5.0 (Windows NT 5.1) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/45.0.2454.85 Safari/537.36']
+# Keep local development cross-origin access narrow instead of allowing every
+# website to make requests to the local Selenium service. Override this comma-
+# separated list when serving the frontend from a different local origin.
+_DEFAULT_ALLOWED_ORIGINS = {
+    "http://127.0.0.1:8000",
+    "http://localhost:8000",
+    "http://127.0.0.1:5000",
+    "http://localhost:5000",
+}
+_configured_origins = os.environ.get("SHELTERSCAN_ALLOWED_ORIGINS")
+ALLOWED_ORIGINS = (
+    {
+        origin.strip()
+        for origin in _configured_origins.split(",")
+        if origin.strip()
+    }
+    if _configured_origins
+    else _DEFAULT_ALLOWED_ORIGINS
+)
 
-    return ua[(random()*(len(ua))).__floor__()]
 
-def initialize_param():
-    opts = Options()
-    opts.add_argument("--no-sandbox")
-    opts.add_argument("--disable-extensions")
-    opts.add_argument(f'--user-agent={get_rand_info()}')
-    opts.add_argument("--headless")
-    return opts
+def initialize_param() -> Options:
+    """Return Chrome options suitable for the non-interactive lookup."""
+    options = Options()
+    options.add_argument("--headless=new")
+    options.add_argument("--disable-extensions")
+    options.add_argument("--disable-dev-shm-usage")
+    options.add_argument("--window-size=1280,800")
+    return options
 
-def organize(loc_name_lis:list, info_lis:list):
-    assert len(loc_name_lis)==len(info_lis)
-    organized = []
-    for i in range(len(info_lis)):
-        dix = {}
-        dix["name"] = loc_name_lis[i].get_attribute("textContent")
-        for num in info_lis[i]:
-            dix[num.get_attribute("class")] = num.get_attribute("textContent")
-        organized.append(dix)
-    return organized
 
-def remove_dir(lis:list):
-    temp = []
-    for i in lis:
-        if i.get_attribute("textContent").strip()=="Directions":
-            pass
+def _result_snapshot(cards) -> tuple[str, ...]:
+    """Return text used to tell when HUD's asynchronous results have settled."""
+    return tuple(card.get_attribute("textContent").strip() for card in cards)
+
+
+def _wait_for_result_cards(driver: webdriver.Chrome):
+    """Wait for HUD's JavaScript results to appear and stop changing.
+
+    HUD fills ``#results`` asynchronously with direct ``li`` children. Waiting
+    for a stable snapshot avoids returning only the first completed Places
+    detail callback. The deadline also prevents a failed upstream lookup from
+    tying up a Flask request forever.
+    """
+    deadline = monotonic() + RESULT_TIMEOUT_SECONDS
+    previous_snapshot = None
+    stable_since = None
+
+    while monotonic() < deadline:
+        cards = driver.find_elements(By.XPATH, "//*[@id='results']/li")
+        if cards:
+            snapshot = _result_snapshot(cards)
+            if snapshot == previous_snapshot:
+                if stable_since is not None and (
+                    monotonic() - stable_since >= RESULT_STABLE_SECONDS
+                ):
+                    return cards
+            else:
+                previous_snapshot = snapshot
+                stable_since = monotonic()
         else:
-            temp.append(i)
-    return temp
+            no_results = driver.find_elements(By.ID, "no-results")
+            if no_results and no_results[0].is_displayed():
+                return []
 
-def scrape(loc:str): 
-    driver = webdriver.Chrome(options = initialize_param())
+        sleep(0.25)
 
-    driver.get(f"https://www.hud.gov/findshelter/Search?search-for=shelter&place={loc}&keyword=")
+    raise TimeoutException("HUD shelter results did not finish loading")
 
-    name_lis = check_loaded("//ul[@id='results']/li/h6", driver)
-    info_lis = check_loaded("//ul[@id='results']/li/ul/li", driver)
 
-    parent = info_lis[0].find_element(By.XPATH, "..")
-    group = []
-    temp = []
-    info_lis = remove_dir(info_lis)
-    for i in range(len(info_lis)):
-        x = info_lis[i]
-        if i==(len(info_lis)-1):
-            temp.append(x)
-            group.append(temp)
-        if parent == x.find_element(By.XPATH, ".."):
-            temp.append(x)
-        else:
-            parent = x.find_element(By.XPATH, "..")
-            group.append(temp)
-            temp = []
-            temp.append(x)
-    final = {"dix":organize(name_lis, group)}
-    print(final)
-    return final
+def organize(result_cards) -> list[dict[str, str]]:
+    """Convert HUD result elements to the frontend's JSON data contract."""
+    shelters = []
+    supported_fields = {"address", "web", "phone"}
 
-@app.route("/shelter_loc/<loc>", methods=['GET'])
+    for card in result_cards:
+        headings = card.find_elements(By.XPATH, "./h6")
+        if not headings:
+            continue
+
+        shelter = {"name": headings[0].get_attribute("textContent").strip()}
+        for detail in card.find_elements(By.XPATH, "./ul/li"):
+            class_names = detail.get_attribute("class").split()
+            field = next(
+                (name for name in class_names if name in supported_fields), None
+            )
+            if field:
+                value = detail.get_attribute("textContent").strip()
+                if value:
+                    shelter[field] = value
+
+        if shelter["name"]:
+            shelters.append(shelter)
+
+    return shelters
+
+
+def _normalize_shelter_text(value: object) -> str:
+    """Trim shelter text and collapse repeated whitespace."""
+    return " ".join(value.split()) if isinstance(value, str) else ""
+
+
+def _deduplicate_shelters(
+    shelters: list[dict[str, str]],
+) -> list[dict[str, str | None]]:
+    """Normalize shelters and merge duplicate name/address records in order."""
+    unique_shelters: dict[tuple[str, str], dict[str, str | None]] = {}
+
+    for shelter in shelters:
+        name = _normalize_shelter_text(shelter.get("name"))
+        address = _normalize_shelter_text(shelter.get("address"))
+        normalized: dict[str, str | None] = {
+            "name": name,
+            "address": address,
+            "phone": _normalize_shelter_text(shelter.get("phone")) or None,
+            "web": _normalize_shelter_text(shelter.get("web")) or None,
+        }
+        key = (name.lower(), address.lower())
+        existing = unique_shelters.get(key)
+
+        if existing is None:
+            unique_shelters[key] = normalized
+            continue
+
+        for field in ("phone", "web"):
+            if existing[field] is None and normalized[field] is not None:
+                existing[field] = normalized[field]
+
+    return list(unique_shelters.values())
+
+
+def scrape(location: str) -> dict[str, list[dict[str, str | None]]]:
+    """Use headless Chrome to retrieve live shelter results from HUD."""
+    query = urlencode(
+        {"search-for": "shelter", "place": location, "keyword": ""}
+    )
+    driver = None
+
+    try:
+        driver = webdriver.Chrome(options=initialize_param())
+        driver.set_page_load_timeout(30)
+        driver.get(f"{HUD_SEARCH_URL}?{query}")
+        result_cards = _wait_for_result_cards(driver)
+        return {"dix": _deduplicate_shelters(organize(result_cards))}
+    finally:
+        if driver is not None:
+            try:
+                driver.quit()
+            except Exception:  # Cleanup must not mask the original lookup error.
+                app.logger.warning("Chrome did not close cleanly after a lookup")
+
+
+def _normalise_location(location: str) -> str:
+    """Validate and normalize the user-controlled URL path value."""
+    location = " ".join(location.split())
+    if not location:
+        raise ValueError("A location is required.")
+    if len(location) > MAX_LOCATION_LENGTH:
+        raise ValueError(
+            f"Location must be {MAX_LOCATION_LENGTH} characters or fewer."
+        )
+    return location
+
+
+@app.after_request
+def add_response_headers(response):
+    """Allow configured local frontends and apply basic response hardening."""
+    origin = request.headers.get("Origin")
+    if origin in ALLOWED_ORIGINS:
+        response.headers["Access-Control-Allow-Origin"] = origin
+        response.headers.add("Vary", "Origin")
+    response.headers["Cache-Control"] = "no-store"
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    return response
+
+
+@app.get("/shelter_loc/<path:loc>")
 def shelter_loc(loc):
-    res = jsonify(scrape(loc))
-    res.headers.add('Access-Control-Allow-Origin', '*')
-    return res
+    """Return live HUD shelter data for a user-supplied location."""
+    origin = request.headers.get("Origin")
+    if origin and origin not in ALLOWED_ORIGINS:
+        return jsonify({"error": "This frontend origin is not allowed."}), 403
+
+    try:
+        location = _normalise_location(loc)
+    except ValueError as error:
+        return jsonify({"error": str(error)}), 400
+
+    try:
+        return jsonify(scrape(location))
+    except TimeoutException:
+        app.logger.warning("HUD shelter lookup timed out")
+        return (
+            jsonify({"error": "Shelter lookup timed out. Please try again."}),
+            504,
+        )
+    except WebDriverException:
+        app.logger.exception("Chrome could not complete the HUD shelter lookup")
+        return jsonify({"error": "Shelter lookup is temporarily unavailable."}), 503
+    except Exception:
+        app.logger.exception("Unexpected shelter lookup failure")
+        return jsonify({"error": "Unable to retrieve shelters right now."}), 502
+
 
 if __name__ == "__main__":
-    shelter_loc("irvine")
+    app.run(debug=True)
