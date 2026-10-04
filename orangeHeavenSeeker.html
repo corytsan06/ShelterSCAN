@@ -3,46 +3,35 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Orange Heaven Seeker</title>
+    <title>ShelterSCAN</title>
     <link href="https://fonts.googleapis.com/css2?family=Roboto:wght@400;700&display=swap" rel="stylesheet">
     <link rel="stylesheet" href="orangeHeavenSeeker.css">
     <script src="https://code.jquery.com/jquery-3.6.0.min.js"></script>
     <script src="createShelterList.js"></script>
-
-    <link rel="stylesheet" href="./styles/dvd.css">
 </head>
 <body>
     <header>
-        ShelterSCAN
+        <h1>ShelterSCAN</h1>
+        <p>Find nearby emergency shelters.</p>
     </header>
     <div class="main-content">
         <div class="left-column">
             <div class="controls">
                 <input type="text" id="userAddress" placeholder="Enter origin">
-                <button id="create-table-btn" onclick="get_shelter()">Get Shelters Near You</button>
+                <button type="button" id="create-table-btn" onclick="get_shelter()">Get Shelters Near You</button>
             </div>
             <div id="table-container" class="table-section"></div>
-            <div id="output"></div>
+            <div id="output" aria-live="polite"></div>
         </div>
         <div class="right-column">
             <div id="map" class="map-section"></div>
         </div>
     </div>
 
-    <div id="dvd-overlay" class="hidden">
-        <div id="bouncing-image"></div>
-    </div>
-
-    <script src="./scripts/dvd.js"></script>
     <script src="orangeHeavenSeeker.js"></script>
-    <script src="https://maps.googleapis.com/maps/api/js?key=AIzaSyCpOqQpp9edLWSJWlixD2bnmYaufSBiGUA&libraries=places&callback=initGoogleAPI" async defer></script>
     <script>
-        $(document).ready(function () {
-            const data = JSON.parse(localStorage.getItem('shelterData'));
-            if (data) {
-                createTable(data);
-            }
-        });
+        document.addEventListener('DOMContentLoaded', loadStoredShelters);
     </script>
+    <script src="maps-config.js"></script>
 </body>
 </html>

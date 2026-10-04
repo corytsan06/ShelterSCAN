@@ -27,22 +27,29 @@ body {
     width: 60%;
 }
 
-#typedText {
+#brand-title {
     color: white;
     font-size: 70px;
-    margin-bottom: 50px;
+    margin-bottom: 12px;
+}
+
+#typedText {
+    min-height: 34px;
+    color: white;
+    font-size: 28px;
+    margin-bottom: 36px;
 }
 
 .input-container {
     display: flex;
     align-items: center;
+    justify-content: center;
     position: relative;
 }
 
 input[type="text"] {
     background-color: rgba(255, 255, 255, 0.2);
     color: #fff;
-    /* border: 1px solid rgba(255, 255, 255, 0.5); */
     padding: 12px;
     border-radius: 4px;
     width: 50%;
@@ -60,14 +67,9 @@ input[type="text"]::placeholder {
     color: rgba(255, 255, 255, 0.7);
 }
 
-input[type="text"].rounded {
-    background-color: rgba(255, 255, 255, 0.3);
-    border-radius: 20px;
-    padding: 14px;
-}
-
 #sendBtn {
-    height: 100%;
+    padding: 8px;
+    background: transparent;
     vertical-align: middle;
     font-size: 30px;
     cursor: pointer;
@@ -75,8 +77,26 @@ input[type="text"].rounded {
     color: rgba(0, 0, 255, 0.605);
 }
 
-.hidden {
-    display: none;
+#sendBtn:focus-visible {
+    outline: 2px solid white;
+    outline-offset: 3px;
+    border-radius: 4px;
+}
+
+#sendBtn:disabled {
+    cursor: wait;
+    opacity: 0.55;
+}
+
+#search-status {
+    min-height: 24px;
+    margin-top: 14px;
+    color: white;
+    font-size: 16px;
+}
+
+#search-status.error {
+    color: #ffb4b4;
 }
 
 .video-container {
